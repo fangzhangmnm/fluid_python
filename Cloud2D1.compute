@@ -1,0 +1,167 @@
+int2 gridCount;
+float2 cellSize;
+float timeStep;
+
+float2 GetUV(uint3 id){
+    return (id.xy+.5)/gridCount;
+}
+
+float L;
+float Cp;
+float g;
+float kappa;//R/Cp
+float e_sat;//saturation vapor pressure (mb)
+float C_vent;//ventilation coefficient
+float P_ref;//reference pressure (1000mb)
+
+RWTexture1D<float> thbar;
+RWTexture1D<float> rhbar;
+RWTexture1D<float> rhthbar;
+RWTexture1D<float> pibar;
+
+Texture2D<float> pip;//pi==pow(p/P_ref,kappa); pi==pi_bar+pip;
+RWTexture2D<float> pip_new;
+RWTexture2D<float> pipRhs;
+Texture2D<float2> v;
+RWTexture2D<float2> v_new;
+Texture2D<float> th;
+RWTexture2D<float> th_new;
+Texture2D<float3> Qvcr;//vapor, cloud, rain
+RWTexture2D<float3> Qvcr_new;
+
+
+
+
+#pragma kernel SolvePip
+// pip pip_new rhthbar pipRhs
+
+[numthreads(8,8,1)]
+void SolvePip(uint3 id : SV_DispatchThreadID){
+    float rt_c=rhthbar[id.y];
+    float rt_yp=rhthbar[id.y+1];
+    float rt_ym=rhthbar[id.y-1];
+    float pip_xm=pip[id.xy+int2(-1,0)];
+    float pip_xp=pip[id.xy+int2(1,0)];
+    float pip_yp=pip[id.xy+int2(0,1)];
+    float pip_ym=pip[id.xy+int2(0,-1)];
+            
+    float diagCoeff=-2/(cellSize.x*cellSize.x)-2/(cellSize.y*cellSize.y);
+    float offDiag=
+         (rt_yp-rt_ym)*(pip_yp-pip_ym)/(4*cellSize.y*cellSize.y)
+         +rt_c*(
+            (pip_xp-pip_xm)/(cellSize.x*cellSize.x)
+            +(pip_yp-pip_ym)/(cellSize.y*cellSize.y));
+    pip_new[id.xy]=(pipRhs[id.xy]-offDiag)/diagCoeff;
+}
+
+
+#pragma kernel UpdateV
+// v v_new th thbar
+SamplerState linear_clamp_sampler;
+[numthreads(8,8,1)]
+void UpdateV(uint3 id:SV_DispatchThreadID){
+    float2 uv=GetUV(id);
+    float2 bias=-v[id.xy]*timeStep/(cellSize*gridCount);
+    v_new[id.xy]=
+        v.SampleLevel(linear_clamp_sampler,uv+bias,0)
+        +timeStep*g*float2(0,th[id.xy]/thbar[id.y]);
+}
+
+#pragma kernel CalcPipRhs
+// v rhbar pipRhs
+[numthreads(8,8,1)]
+void CalcPipRhs(uint3 id:SV_DispatchThreadID){
+    float2 v1_xm=v[id.xy+int2(-1,0)]*rhbar[id.y];
+    float2 v1_xp=v[id.xy+int2(1,0)]*rhbar[id.y];
+    float2 v1_yp=v[id.xy+int2(0,1)]*rhbar[id.y+1];
+    float2 v1_ym=v[id.xy+int2(0,-1)]*rhbar[id.y-1];
+    pipRhs[id.xy]=((v1_xp.x-v1_xm.x)/(2*cellSize.x)
+                +(v1_yp.y-v1_ym.y)/(2*cellSize.y))
+                /(Cp*timeStep);
+}
+
+#pragma kernel MinusGradient
+// v v_new pip thbar
+[numthreads(8,8,1)]
+void MinusGradient(uint3 id:SV_DispatchThreadID){
+    
+    float pip_xm=pip[id.xy+int2(-1,0)];
+    float pip_xp=pip[id.xy+int2(1,0)];
+    float pip_yp=pip[id.xy+int2(0,1)];
+    float pip_ym=pip[id.xy+int2(0,-1)];
+    float2 grad=float2(pip_xp-pip_xm,pip_yp-pip_ym)/(2*cellSize.xy);
+
+    v_new[id.xy]=v[id.xy]-grad*Cp*timeStep*thbar[id.y];
+}
+
+#pragma kernel UpdateTh
+// v th th_new
+[numthreads(8,8,1)]
+void UpdateTh(uint3 id:SV_DispatchThreadID){
+    float2 uv=GetUV(id);
+    float2 bias=-v[id.xy]*timeStep/(cellSize*gridCount);
+    th_new[id.xy]=
+        th.SampleLevel(linear_clamp_sampler,uv+bias,0)
+        +timeStep*L/(Cp*pibar[id.y])*(P2-P3-P4);
+}
+
+//Condensation Physics
+
+float GetQvs(th,p,pi){//saturation mixing ratio of water vapor
+    float a=17.3;
+    float b=3.8/p;
+    return b*exp(a*(pi*th-273)/(pi*th-36));
+}
+float GetP2dt(th_adv,Qv_adv,p,pi){//Condensation
+    float a=17.3;
+    float PITH362=(pi*th_adv-36)*(pi*th_adv-36);
+    float Qvs_adv=GetQvs(th_adv,p,pi);
+    float Qv_new;
+    if(Qv_adv<Qvs_adv)
+        Qv_new=Qv_adv;
+    else{
+        float deltaPi=(Qv_adv-Qvs_adv)/
+        (237*a*th_adv*Qvs_adv/PITH362-Qv_adv/(kappa*pi));
+        float pibar=pi+deltaPi/2;
+
+        float r1=1./(1+
+            273*a*pi*Qvs_adv*L/
+            (PITH362*Cp*pi_bar)
+            );
+        Qv_new=Qv_adv-r1*(Qv_adv-Qvs_adv);
+    }
+    return (Qv-Qv_new);
+}
+float GetP3dt(Qc,Qr){//evaporation of cloud droplets
+    if(Qr>0)return 0;
+    else return Qc;
+}
+
+float GetP4dt(Qv,Qr,Qvs,rhbar){//evaporation of raindrops
+    return -(Qv/Qvs-1)*C_vent*pow(rhbar*Qr,0.525)/
+    (rhbar*(5.4e5+.41e7/e_sat))
+    *timeStep;
+}
+#pragma kernel UpdateQTh
+// v Qvcr Qvcr_new
+[numthreads(8,8,1)]
+void UpdateQTh(uint3 id:SV_DispatchThreadID){
+    float2 uv=GetUV(id);
+    float2 bias=-v[id.xy]*timeStep/(cellSize*gridCount);
+    float3 Qvcr_adv=Qvcr.SampleLevel(linear_clamp_sampler,uv+bias,0);
+    float Qv_adv=Qvcr_adv.x;
+    float Qc_adv=Qvcr_adv.y;
+    float Qr_adv=Qvcr_adv.z;
+    float th_adv=th.SampleLevel(linear_clamp_sampler,uv+bias,0);
+
+    //pi==pow(p/P_ref,kappa); pi==pi_bar+pip;
+    float pi=pi_bar[id.y]+pip[id.xy];
+    float p=P_ref*pow(pi,1./kappa);
+
+
+    float Qvs_adv=GetQvs()
+    float P4dt=GetP4dt(Qv_adv,Qr_adv,)
+
+
+}
+
