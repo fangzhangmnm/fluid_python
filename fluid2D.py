@@ -25,7 +25,7 @@ def advect(field,velocity):
     # φ' = φ - (u ⋅ ∇)φ dt
     positions=get_positions()
     old_positions=bound_positions_(positions-velocity*timeStep)
-    return sample_indices(field,old_positions/cellSizes-.5)
+    return sample_indices(field,positions_to_indices(old_positions))
 
 advect_vector=advect # be catious of geometric terms when using curved coordinates
 
@@ -70,7 +70,7 @@ def add_buoyancy(velocity,acceleration):
     return velocity
 
 def calc_total_kinematic_energy(u,rho):
-    return .5*np.prod(cellSizes)*np.sum(rho*np.sum(u**2,axis=-1))
+    return .5*integrate(rho*np.sum(u**2,axis=-1))
 
 
 # ========== Examples ==========
@@ -95,6 +95,8 @@ def diffused_noise(shape,diffuse_amount,nIter):
 
 # ========== Vector Calculus ==========
 
+def integrate(field):
+    return np.sum(field,axis=[0,1])*np.prod(cellSizes)
 
 def grad_x(field):
     return (roll_field(field,-1,axis=0)-roll_field(field,1,axis=0))/(2*cellSizes[0])
@@ -227,24 +229,26 @@ def roll_field(field,dir,axis):
 
 
 def sample_indices(field,indices):
-    #  |  0  |  1  |  2  |  3  |  4  |
-    #  0     1     2     3     4     5
     rtval=np.empty(indices.shape[:2]+(math.prod(field.shape[2:]),))
     field1=field.reshape(field.shape[:2]+(-1,))
     for i in range(rtval.shape[2]):
         rtval[...,i]=map_coordinates(field1[...,i],indices.transpose(2,0,1),order=1,mode='grid-wrap')
     rtval=rtval.reshape(indices.shape[:2]+field.shape[2:])
     return rtval
-
+    
 
 def get_positions():
-    #  |  0  |  1  |  2  |  3  |  4  |
-    #    0.5   1.5   2.5   3.5   4.5
+    #  tex id   |  0  |  1  |  2  |  3  |  4  |
+    #  uv       0     1     2     3     4     5
     x=np.linspace(.5,gridRes[0]-.5,gridRes[0])*cellSizes[0]
     y=np.linspace(.5,gridRes[1]-.5,gridRes[1])*cellSizes[1]
     xy=np.meshgrid(x,y,indexing='ij')
     return np.stack(xy,axis=-1)
 
+def positions_to_indices(positions):
+    #  tex id   |  0  |  1  |  2  |  3  |  4  |
+    #  uv       0     1     2     3     4     5
+    return positions/cellSizes-.5
 
 def get_normalized_positions():
     return get_positions()/(np.asarray(gridRes)*cellSizes)

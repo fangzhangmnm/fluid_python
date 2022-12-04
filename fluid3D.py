@@ -27,7 +27,7 @@ def advect(field,velocity):
     # φ' = φ - (u ⋅ ∇)φ dt
     positions=get_positions()
     old_positions=bound_positions_(positions-velocity*timeStep)
-    return sample_indices(field,old_positions/cellSizes-.5)
+    return sample_indices(field,positions_to_indices(old_positions))
 
 advect_vector=advect # be catious of geometric terms when using curved coordinates
 
@@ -75,7 +75,7 @@ def add_coriolis_force(velocity,w=np.array([0,0,1.99e-7*.71])):
     return velocity-2*timeStep*np.cross(velocity,w)
 
 def calc_total_kinematic_energy(u,rho):
-    return .5*np.prod(cellSizes)*np.sum(rho*np.sum(u**2,axis=-1))
+    return .5*integrate(rho*np.sum(u**2,axis=-1))
 
 # ========== Examples ==========
 
@@ -100,6 +100,9 @@ def diffused_noise(shape,diffuse_amount=1,nIter=10):
 
 # ========== Vector Calculus ==========
 
+def integrate(field):
+    return np.sum(field,axis=(0,1,2))*np.prod(cellSizes)
+
 
 def grad_x(field):
     return (roll_field(field,-1,axis=0)-roll_field(field,1,axis=0))/(2*cellSizes[0])
@@ -112,13 +115,11 @@ def grad_y(field):
 def grad_z(field):
     return (roll_field(field,-1,axis=2)-roll_field(field,1,axis=2))/(2*cellSizes[2])
 
+def grad(field):
+    return np.stack([grad_x(field),grad_y(field),grad_z(field)],axis=-1)
 
 def divergence(vector_field):
     return grad_x(vector_field[...,0])+grad_y(vector_field[...,1])+grad_z(vector_field[...,2])
-
-
-def grad(field):
-    return np.stack([grad_x(field),grad_y(field),grad_z(field)],axis=-1)
 
 
 def curl(vector_field):
@@ -259,8 +260,6 @@ def roll_field(field,dir,axis):
 
 
 def sample_indices(field,indices):
-    #  |  0  |  1  |  2  |  3  |  4  |
-    #  0     1     2     3     4     5
     rtval=np.empty(indices.shape[:3]+(math.prod(field.shape[3:]),))
     field1=field.reshape(field.shape[:3]+(-1,))
     for i in range(rtval.shape[3]):
@@ -270,14 +269,18 @@ def sample_indices(field,indices):
 
 
 def get_positions():
-    #  |  0  |  1  |  2  |  3  |  4  |
-    #    0.5   1.5   2.5   3.5   4.5
+    #  tex id   |  0  |  1  |  2  |  3  |  4  |
+    #  uv       0     1     2     3     4     5
     x=np.linspace(.5,gridRes[0]-.5,gridRes[0])*cellSizes[0]
     y=np.linspace(.5,gridRes[1]-.5,gridRes[1])*cellSizes[1]
     z=np.linspace(.5,gridRes[2]-.5,gridRes[2])*cellSizes[2]
     xyz=np.meshgrid(x,y,z,indexing='ij')
     return np.stack(xyz,axis=-1)
 
+def positions_to_indices(positions):
+    #  tex id   |  0  |  1  |  2  |  3  |  4  |
+    #  uv       0     1     2     3     4     5
+    return positions/cellSizes-.5
 
 def get_normalized_positions():
     return get_positions()/(np.asarray(gridRes)*cellSizes)
